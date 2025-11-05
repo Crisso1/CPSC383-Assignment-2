@@ -410,19 +410,39 @@ def ensure_self_assignment() -> None:
                 my_target = sxy
                 break
     if my_target is None and task_assignments:
+        myid = get_id()
         here = loc_to_xy(get_location())
-        deficits = []  # survivors that still need extra rescuers this tick
+
+        # Step 1: See if we are already listed in any assignments
         for sxy, tinfo in task_assignments.items():
             if tinfo.get("done", False):
                 continue
-            assigned = tinfo.setdefault("assigned_ids", [])
-            required = tinfo.get("required", 1)
-            if len(assigned) < required and myid not in assigned:
-                deficits.append(sxy)
-        if deficits:
-            deficits.sort(key=lambda c: manhattan(here, c))
-            choice = deficits[0]
-            my_target = choice
+            if myid in tinfo.get("assigned_ids", []):
+                my_target = sxy
+                log(my_target)
+                break
+
+        # Step 2: If we aren't assigned to anything, fill a deficit using smarter criteria
+        if my_target is None:
+            deficits = []
+            for sxy, tinfo in task_assignments.items():
+                if tinfo.get("done", False):
+                    continue
+                assigned = tinfo.setdefault("assigned_ids", [])
+                required = tinfo.get("required", 1)
+                if len(assigned) < required and myid not in assigned:
+                    # Only consider if a path exists
+                    goal_loc = xy_to_loc(sxy)
+                    path = a_star(get_location(), goal_loc, avoid_unknown=True)
+                    if path:  # Only consider viable paths
+                        deficits.append((sxy, path))
+
+            if deficits:
+                # Sort by path length instead of manhattan distance
+                deficits.sort(key=lambda tup: len(tup[1]))
+                choice, _ = deficits[0]
+                my_target = choice
+                task_assignments[choice]["assigned_ids"].append(myid)  # Explicitly claim it
 
     if my_target != previous:
         current_path = []
@@ -657,13 +677,6 @@ def think() -> None:
         known_agent_ids.add(get_id())
         broadcast(f"HELLO|{get_id()}")
         report_position()
-        # TODO: Probably dont need this code?
-        # if agent_role == ROLE_COORDINATOR:
-        #     try:
-        #         for s in get_survs():
-        #             drone_scan(s)
-        #     except Exception:
-        #         pass
         has_initialized = True
         return
 
