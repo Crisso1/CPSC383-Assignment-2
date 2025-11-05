@@ -42,6 +42,7 @@ my_target = None                     # tuple[int,int] | None
 current_path = []                    # list[Direction]
 current_path_goal = None             # tuple[int,int] | None
 current_path_avoid_unknown = True    # bool
+current_charger_xy = None
 
 # ----------------------------
 # Utilities
@@ -371,6 +372,7 @@ def estimate_path_cost_astar(src_xy: tuple[int, int], dst_xy: tuple[int, int]) -
 # ----------------------------
 # Task creation and roles
 # ----------------------------
+# TODO: .requires_two_agents and .strength() not proper API calls?
 def cell_requires_two_diggers(cell) -> bool:
     try:
         top = cell.top_layer
@@ -458,6 +460,13 @@ def coordinator_tick() -> bool:
         if action_used:
             break
         loc = survivor_lookup[coord]
+        cell = get_cell_info_at(loc)
+        if cell is None:
+            continue
+        top = isinstance(top, Survivor)
+        if isinstance(top, Survivor):
+            scanned_survivors.add(coord)
+            continue
         try:
             drone_scan(loc)
         except Exception:
@@ -541,17 +550,14 @@ def worker_tick() -> None:
 # ----------------------------
 # Acting helpers
 # ----------------------------
+# TODO: Need to figure out why its not heading towards charging cells
 def need_recharge_for(target_xy: tuple[int, int]) -> tuple[bool, tuple[int, int] | None]:
     """Return a tuple indicating whether to recharge and the chosen charger (None when unavailable)."""
     here_xy = loc_to_xy(get_location())
     est = estimate_path_cost_astar(here_xy, target_xy)
     if est >= 1_000_000:
         return (False, None)
-    buffer = 6
-    dig_cost = 1
-    save_cost = 1
-    required = est + buffer + dig_cost + save_cost
-    if get_energy_level() >= required:
+    if get_energy_level() >= est:
         return (False, None)
 
     best_charger = None
@@ -642,6 +648,7 @@ def synchronize_and_dig(target_xy: tuple[int, int], required: int) -> bool:
 def think() -> None:
     global has_initialized, agent_role, my_target, coordinator_id
     global current_path, current_path_goal, current_path_avoid_unknown
+    global current_charger_xy
 
     if not has_initialized:
         # start as provisional coordinator; will yield to lower id once discovered
@@ -650,12 +657,13 @@ def think() -> None:
         known_agent_ids.add(get_id())
         broadcast(f"HELLO|{get_id()}")
         report_position()
-        if agent_role == ROLE_COORDINATOR:
-            try:
-                for s in get_survs():
-                    drone_scan(s)
-            except Exception:
-                pass
+        # TODO: Probably dont need this code?
+        # if agent_role == ROLE_COORDINATOR:
+        #     try:
+        #         for s in get_survs():
+        #             drone_scan(s)
+        #     except Exception:
+        #         pass
         has_initialized = True
         return
 
@@ -664,6 +672,8 @@ def think() -> None:
     update_self_snapshot()
     share_visible_survivors()
     update_role_from_known_ids()
+
+    here_xy = loc_to_xy(get_location())
 
     action_used = False
     if agent_role == ROLE_COORDINATOR:
@@ -693,17 +703,26 @@ def think() -> None:
         else:
             return
 
+    
     needs_recharge, charger_xy = need_recharge_for(my_target)
+
+    if here_xy == current_charger_xy:
+            recharge()
+            current_charger_xy = None  # Clear after recharging
+            return
+    
     if needs_recharge:
-        here_xy = loc_to_xy(get_location())
-        if charger_xy is None:
+        # Set charger only if not already set or if target changed
+        if current_charger_xy is None:
+            current_charger_xy = charger_xy
+
+        if current_charger_xy is None:
             move(Direction.CENTER)
             return
-        if here_xy == charger_xy:
-            recharge()
+        
+        if act_move_towards(current_charger_xy, avoid_unknown=True):
             return
-        if act_move_towards(charger_xy, avoid_unknown=True):
-            return
+
         move(Direction.CENTER)
         return
 
