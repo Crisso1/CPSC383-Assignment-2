@@ -371,27 +371,6 @@ def estimate_path_cost_astar(src_xy: tuple[int, int], dst_xy: tuple[int, int]) -
 # ----------------------------
 # Task creation and roles
 # ----------------------------
-# TODO: .requires_two_agents and .strength() not proper API calls?
-def cell_requires_two_diggers(cell) -> bool:
-    try:
-        top = cell.top_layer
-        if isinstance(top, Rubble):
-            # heuristic: strength>=2 may require two; if API exposes flag, use it
-            try:
-                if bool(top.requires_two_agents):
-                    return True
-            except AttributeError:
-                pass
-            try:
-                if int(top.strength) >= 2:
-                    return True
-            except AttributeError:
-                pass
-    except Exception:
-        pass
-    return False
-
-
 def ensure_self_assignment() -> None:
     """Pick a survivor if we are listed in its assignment, or fill gaps if any remain."""
     global my_target, current_path, current_path_goal, current_path_avoid_unknown
