@@ -42,6 +42,7 @@ my_target = None                     # tuple[int,int] | None
 current_path = []                    # list[Direction]
 current_path_goal = None             # tuple[int,int] | None
 current_path_avoid_unknown = True    # bool
+current_charger_xy = None
 
 # ----------------------------
 # Utilities
@@ -177,7 +178,6 @@ def ingest_survivor_message(msg: str) -> None:
 
 def process_incoming_messages() -> None:
     global rubble_ready
-    rubble_ready = {}
 
     msgs = parse_messages()
     for s in msgs:
@@ -230,15 +230,6 @@ def share_visible_survivors() -> None:
     known_survivor_coords.clear()
     for s in survs:
         record_survivor(s, announce=False)
-
-
-def nearest_charger(from_xy: tuple[int, int]) -> tuple[int, int] | None:
-    chargers = get_charging_cells()
-    if not chargers:
-        return None
-    chargers_xy = [loc_to_xy(c) for c in chargers]
-    chargers_xy.sort(key=lambda cxy: manhattan(from_xy, cxy))
-    return chargers_xy[0]
 
 
 # ----------------------------
@@ -380,6 +371,7 @@ def estimate_path_cost_astar(src_xy: tuple[int, int], dst_xy: tuple[int, int]) -
 # ----------------------------
 # Task creation and roles
 # ----------------------------
+# TODO: .requires_two_agents and .strength() not proper API calls?
 def cell_requires_two_diggers(cell) -> bool:
     try:
         top = cell.top_layer
@@ -417,19 +409,39 @@ def ensure_self_assignment() -> None:
                 my_target = sxy
                 break
     if my_target is None and task_assignments:
+        myid = get_id()
         here = loc_to_xy(get_location())
-        deficits = []  # survivors that still need extra rescuers this tick
+
+        # Step 1: See if we are already listed in any assignments
         for sxy, tinfo in task_assignments.items():
             if tinfo.get("done", False):
                 continue
-            assigned = tinfo.setdefault("assigned_ids", [])
-            required = tinfo.get("required", 1)
-            if len(assigned) < required and myid not in assigned:
-                deficits.append(sxy)
-        if deficits:
-            deficits.sort(key=lambda c: manhattan(here, c))
-            choice = deficits[0]
-            my_target = choice
+            if myid in tinfo.get("assigned_ids", []):
+                my_target = sxy
+                log(my_target)
+                break
+
+        # Step 2: If we aren't assigned to anything, fill a deficit using smarter criteria
+        if my_target is None:
+            deficits = []
+            for sxy, tinfo in task_assignments.items():
+                if tinfo.get("done", False):
+                    continue
+                assigned = tinfo.setdefault("assigned_ids", [])
+                required = tinfo.get("required", 1)
+                if len(assigned) < required and myid not in assigned:
+                    # Only consider if a path exists
+                    goal_loc = xy_to_loc(sxy)
+                    path = a_star(get_location(), goal_loc, avoid_unknown=True)
+                    if path:  # Only consider viable paths
+                        deficits.append((sxy, path))
+
+            if deficits:
+                # Sort by path length instead of manhattan distance
+                deficits.sort(key=lambda tup: len(tup[1]))
+                choice, _ = deficits[0]
+                my_target = choice
+                task_assignments[choice]["assigned_ids"].append(myid)  # Explicitly claim it
 
     if my_target != previous:
         current_path = []
@@ -467,6 +479,13 @@ def coordinator_tick() -> bool:
         if action_used:
             break
         loc = survivor_lookup[coord]
+        cell = get_cell_info_at(loc)
+        if cell is None:
+            continue
+        top = isinstance(top, Survivor)
+        if isinstance(top, Survivor):
+            scanned_survivors.add(coord)
+            continue
         try:
             drone_scan(loc)
         except Exception:
@@ -485,7 +504,7 @@ def coordinator_tick() -> bool:
         except AttributeError:
             top = None
         if isinstance(top, Rubble):
-            required = 2 if cell_requires_two_diggers(cell) else 1
+            required = top.agents_required
         new_tasks[coord] = {
             "required": required,
             "assigned_ids": [],
@@ -550,17 +569,14 @@ def worker_tick() -> None:
 # ----------------------------
 # Acting helpers
 # ----------------------------
+# TODO: Need to figure out why its not heading towards charging cells
 def need_recharge_for(target_xy: tuple[int, int]) -> tuple[bool, tuple[int, int] | None]:
     """Return a tuple indicating whether to recharge and the chosen charger (None when unavailable)."""
     here_xy = loc_to_xy(get_location())
     est = estimate_path_cost_astar(here_xy, target_xy)
     if est >= 1_000_000:
         return (False, None)
-    buffer = 6
-    dig_cost = 1
-    save_cost = 1
-    required = est + buffer + dig_cost + save_cost
-    if get_energy_level() >= required:
+    if get_energy_level() >= est:
         return (False, None)
 
     best_charger = None
@@ -625,12 +641,14 @@ def synchronize_and_dig(target_xy: tuple[int, int], required: int) -> bool:
     cell = get_cell_info_at(here)
     if cell is None:
         return False
+    
     if isinstance(cell.top_layer, Survivor):
         save()
         broadcast(f"DONE|{target_xy[0]}|{target_xy[1]}")
         if target_xy in task_assignments:
             task_assignments[target_xy]["done"] = True
         return True
+    
     if isinstance(cell.top_layer, Rubble):
         if required <= 1:
             dig()
@@ -638,9 +656,13 @@ def synchronize_and_dig(target_xy: tuple[int, int], required: int) -> bool:
         broadcast(f"AT_RUBBLE|{target_xy[0]}|{target_xy[1]}|{get_id()}")
         allies = rubble_ready.setdefault(target_xy, set())
         allies.add(get_id())
+        log(f"Agent {get_id()} waiting at rubble {target_xy}: "
+            f"{len(allies)}/{required} agents ready")
         if len(allies) >= required:
+            log(f"Agent {get_id()} sees enough allies — digging now at {target_xy}")
             dig()
             return True
+        log(f"Agent {get_id()} still waiting to dig rubble {target_xy}")
         return True
     return False
 
@@ -651,6 +673,7 @@ def synchronize_and_dig(target_xy: tuple[int, int], required: int) -> bool:
 def think() -> None:
     global has_initialized, agent_role, my_target, coordinator_id
     global current_path, current_path_goal, current_path_avoid_unknown
+    global current_charger_xy
 
     if not has_initialized:
         # start as provisional coordinator; will yield to lower id once discovered
@@ -659,12 +682,6 @@ def think() -> None:
         known_agent_ids.add(get_id())
         broadcast(f"HELLO|{get_id()}")
         report_position()
-        if agent_role == ROLE_COORDINATOR:
-            try:
-                for s in get_survs():
-                    drone_scan(s)
-            except Exception:
-                pass
         has_initialized = True
         return
 
@@ -673,6 +690,8 @@ def think() -> None:
     update_self_snapshot()
     share_visible_survivors()
     update_role_from_known_ids()
+
+    here_xy = loc_to_xy(get_location())
 
     action_used = False
     if agent_role == ROLE_COORDINATOR:
@@ -702,17 +721,26 @@ def think() -> None:
         else:
             return
 
+    
     needs_recharge, charger_xy = need_recharge_for(my_target)
+
+    if here_xy == current_charger_xy:
+            recharge()
+            current_charger_xy = None  # Clear after recharging
+            return
+    
     if needs_recharge:
-        here_xy = loc_to_xy(get_location())
-        if charger_xy is None:
+        # Set charger only if not already set or if target changed
+        if current_charger_xy is None:
+            current_charger_xy = charger_xy
+
+        if current_charger_xy is None:
             move(Direction.CENTER)
             return
-        if here_xy == charger_xy:
-            recharge()
+        
+        if act_move_towards(current_charger_xy, avoid_unknown=True):
             return
-        if act_move_towards(charger_xy, avoid_unknown=True):
-            return
+
         move(Direction.CENTER)
         return
 
