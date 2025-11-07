@@ -68,7 +68,7 @@ def manhattan(a: tuple[int, int], b: tuple[int, int]) -> int:
 
 def broadcast(msg: str) -> None:
     try:
-        send_message(msg, [])
+        send_message(msg, None)
     except Exception:
         pass
 
@@ -164,7 +164,10 @@ def ingest_rubble_message(msg: str) -> None:
         agents.add(int(sid))
         info = task_assignments.setdefault(coord, {"required": 1, "assigned_ids": [], "done": False})
         info["required"] = max(info.get("required", 1), 2)
+        log(f"DEBUG: Received rubble msg {msg}, rubble_ready[{coord}] now {rubble_ready[coord]}")
+        log(f"DEBUG: Rubble update at {coord} now has {len(agents)} agents: {sorted(list(agents))}")
     except Exception:
+        log(f"DEBUG: Rubble parse failed: {msg} ({e})")
         pass
 
 
@@ -180,6 +183,10 @@ def process_incoming_messages() -> None:
     global rubble_ready
 
     msgs = parse_messages()
+    if not msgs:
+        log(f"DEBUG: No messages received this round.")
+    else:
+        log(f"DEBUG: Received {len(msgs)} messages: {msgs}")
     for s in msgs:
         if s.startswith("POS|"):
             ingest_pos_message(s)
