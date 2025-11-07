@@ -36,6 +36,7 @@ known_agent_ids = set()              # set[int]
 coordinator_id = None                # int | None
 scanned_survivors = set()            # set[(x,y)] of drone-scanned tiles
 rubble_ready = {}                    # dict[(x,y)] -> set[int]
+allies = {}
 
 # my planning state
 my_target = None                     # tuple[int,int] | None
@@ -86,19 +87,21 @@ def record_survivor(loc: Location, announce: bool = False) -> None:
 def parse_messages() -> list[str]:
     msgs = []
     try:
-        for m in read_messages():
-            try:
-                if isinstance(m, str):
-                    msgs.append(m)
-                else:
-                    try:
-                        msgs.append(str(m.text))
-                    except AttributeError:
-                        msgs.append(str(m))
-            except Exception:
-                continue
-    except Exception:
+        raw = read_messages()
+
+        for m in raw:
+            text = str(m)
+            colon_index = text.find(':')
+            if colon_index != -1:
+                # Get everything after the colon and strip spaces and quotes
+                msg = text[colon_index + 1:].strip()
+                if msg.startswith('"') and msg.endswith('"'):
+                    msg = msg[1:-1]
+                msgs.append(msg)
+
+    except Exception as e:
         return []
+
     return msgs
 
 
@@ -157,6 +160,7 @@ def ingest_hello_message(msg: str) -> None:
 
 
 def ingest_rubble_message(msg: str) -> None:
+    global rubble_ready
     try:
         _, sx, sy, sid = msg.split("|")
         coord = (int(sx), int(sy))
@@ -178,8 +182,6 @@ def ingest_survivor_message(msg: str) -> None:
 
 def process_incoming_messages() -> None:
     global rubble_ready
-    rubble_ready = {}
-
     msgs = parse_messages()
     for s in msgs:
         if s.startswith("POS|"):
@@ -379,12 +381,12 @@ def cell_requires_two_diggers(cell) -> bool:
         if isinstance(top, Rubble):
             # heuristic: strength>=2 may require two; if API exposes flag, use it
             try:
-                if bool(top.requires_two_agents):
+                if top.agents_required >= 2:
                     return True
             except AttributeError:
                 pass
             try:
-                if int(top.strength) >= 2:
+                if top.energy_required >= 2:
                     return True
             except AttributeError:
                 pass
@@ -419,7 +421,6 @@ def ensure_self_assignment() -> None:
                 continue
             if myid in tinfo.get("assigned_ids", []):
                 my_target = sxy
-                log(my_target)
                 break
 
         # Step 2: If we aren't assigned to anything, fill a deficit using smarter criteria
@@ -636,6 +637,7 @@ def act_move_towards(dst_xy: tuple[int, int], avoid_unknown: bool = True) -> boo
 
 
 def synchronize_and_dig(target_xy: tuple[int, int], required: int) -> bool:
+    global allies, rubble_ready
     here = get_location()
     if (here.x, here.y) != target_xy:
         return False
@@ -649,13 +651,16 @@ def synchronize_and_dig(target_xy: tuple[int, int], required: int) -> bool:
             task_assignments[target_xy]["done"] = True
         return True
     if isinstance(cell.top_layer, Rubble):
+        log("this triggers3")
         if required <= 1:
             dig()
             return True
         broadcast(f"AT_RUBBLE|{target_xy[0]}|{target_xy[1]}|{get_id()}")
         allies = rubble_ready.setdefault(target_xy, set())
         allies.add(get_id())
+        log(len(allies))
         if len(allies) >= required:
+            log("this triggers5")
             dig()
             return True
         return True
