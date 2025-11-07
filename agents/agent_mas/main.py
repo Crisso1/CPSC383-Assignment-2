@@ -37,6 +37,7 @@ coordinator_id = None                # int | None
 scanned_survivors = set()            # set[(x,y)] of drone-scanned tiles
 rubble_ready = {}                    # dict[(x,y)] -> set[int]
 allies = {}
+arrived_last_round = {}  # Dict[int, tuple[int, int]]: agent_id -> (x, y)
 
 # my planning state
 my_target = None                     # tuple[int,int] | None
@@ -651,16 +652,13 @@ def synchronize_and_dig(target_xy: tuple[int, int], required: int) -> bool:
             task_assignments[target_xy]["done"] = True
         return True
     if isinstance(cell.top_layer, Rubble):
-        log("this triggers3")
         if required <= 1:
             dig()
             return True
         broadcast(f"AT_RUBBLE|{target_xy[0]}|{target_xy[1]}|{get_id()}")
         allies = rubble_ready.setdefault(target_xy, set())
         allies.add(get_id())
-        log(len(allies))
         if len(allies) >= required:
-            log("this triggers5")
             dig()
             return True
         return True
@@ -752,6 +750,7 @@ def think() -> None:
 
     if synchronize_and_dig(my_target, required):
         return
+    
     my_target = None
     current_path = []
     current_path_goal = None
